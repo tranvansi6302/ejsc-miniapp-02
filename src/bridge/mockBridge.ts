@@ -37,7 +37,7 @@ if (typeof window !== 'undefined') {
 
     if (data?.type === 'EJSC_SAFE_AREA_UPDATE') {
       const { top, bottom, left, right, fontSizeScale, isRealDevice } = data;
-      
+
       const root = document.documentElement;
       root.style.setProperty('--safe-area-inset-top', `${top}px`);
       root.style.setProperty('--safe-area-inset-bottom', `${bottom}px`);
@@ -45,7 +45,7 @@ if (typeof window !== 'undefined') {
       root.style.setProperty('--safe-area-inset-right', `${right}px`);
       root.style.setProperty('--is-real-device', isRealDevice ? '1' : '0');
       root.style.setProperty('--device-border-radius', `${data.borderRadius || 0}px`);
-      
+
       if (fontSizeScale) {
         root.style.zoom = fontSizeScale.toString();
       }
@@ -63,9 +63,10 @@ const flutterCallbacks = new Map<number, { success?: Function; fail?: Function; 
 function createBridgeMethod(apiName: string, localMockFn: Function, action?: string) {
   return (...args: any[]) => {
     const opts = args[args.length - 1] || {};
-    const { success, fail, complete, ...rest } = typeof opts === 'object' ? opts : {};
+    const { success: originalSuccess, fail: originalFail, complete: originalComplete, ...rest } =
+      (typeof opts === 'object' && opts !== null) ? opts : {};
 
-    const flutterBridge = typeof window !== 'undefined' ? window.EjscBridge : null;
+    const flutterBridge = typeof window !== 'undefined' ? (window as any).EjscBridge : null;
     const isInIframe = typeof window !== 'undefined' && window.parent !== window;
 
     let finalParams = rest;
@@ -73,52 +74,87 @@ function createBridgeMethod(apiName: string, localMockFn: Function, action?: str
       finalParams = { ...rest, action };
     }
 
-    if (flutterBridge && typeof flutterBridge.postMessage === 'function') {
-      // 1. Thiết bị thật (Flutter WebView)
-      console.info(`[Bridge] Forwarding to Flutter Native: ${apiName}`, finalParams);
-      const id = flutterCallbackId++;
-      flutterCallbacks.set(id, { success, fail, complete });
+    return new Promise((resolve, reject) => {
+      // Wrapper cho các callback để vừa gọi callback cũ vừa resolve/reject Promise
+      const handleSuccess = (data: any) => {
+        originalSuccess?.(data);
+        resolve({ success: true, data });
+      };
 
-      flutterBridge.postMessage(JSON.stringify({
-        method: apiName,
-        id,
-        params: finalParams
-      }));
-    } else if (isInIframe) {
-      // 2. Simulator (iframe)
-      console.info(`[Bridge] Forwarding to Simulator: ${apiName}`, finalParams);
-      const callbackId = `${apiName}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      pendingCallbacks.set(callbackId, { success, fail, complete });
+      const handleFail = (error: any) => {
+        originalFail?.(error);
+        resolve({ success: false, data: error });
+      };
 
-      window.parent.postMessage({
-        type: 'EJSC_BRIDGE_REQUEST',
-        method: apiName,
-        args: finalParams,
-        callbackId
-      }, '*');
-    } else {
-      // 3. Trình duyệt Web thông thường (Mock Mode)
-      console.info(`[Bridge] Using Mock Data: ${apiName}`);
-      return localMockFn(...args);
-    }
+      const handleComplete = (res: any) => {
+        originalComplete?.(res);
+      };
+
+      if (flutterBridge && typeof flutterBridge.postMessage === 'function') {
+        // 1. Thiết bị thật (Flutter WebView)
+        console.info(`[Bridge] Forwarding to Flutter Native: ${apiName}`, finalParams);
+        const id = flutterCallbackId++;
+        console.info(`[NativeBridge] Registering callback for id: ${id}`);
+        flutterCallbacks.set(id, { success: handleSuccess, fail: handleFail, complete: handleComplete });
+
+        flutterBridge.postMessage(JSON.stringify({
+          method: apiName,
+          id,
+          params: finalParams
+        }));
+      } else if (isInIframe) {
+        // 2. Simulator (iframe)
+        console.info(`[Bridge] Forwarding to Simulator: ${apiName}`, finalParams);
+        const callbackId = `${apiName}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        pendingCallbacks.set(callbackId, { success: handleSuccess, fail: handleFail, complete: handleComplete });
+
+        window.parent.postMessage({
+          type: 'EJSC_BRIDGE_REQUEST',
+          method: apiName,
+          args: finalParams,
+          callbackId
+        }, '*');
+      } else {
+        // 3. Trình duyệt Web thông thường (Mock Mode)
+        console.info(`[Bridge] Using Mock Data: ${apiName}`);
+
+        // Mock mode: truyền các wrapper vào để localMockFn có thể gọi
+        const mockResult = localMockFn({
+          ...finalParams,
+          success: handleSuccess,
+          fail: handleFail,
+          complete: handleComplete
+        });
+
+        // Nếu localMockFn trả về giá trị trực tiếp mà không gọi callback
+        if (mockResult !== undefined) { 
+          setTimeout(() => handleSuccess(mockResult), 0);
+        }
+      }
+    });
   };
 }
 
 if (typeof window !== 'undefined') {
   // Khởi tạo nếu chưa có
-  if (!window.ejsc) {
-    window.ejsc = {};
+  if (!(window as any).ejsc) {
+    (window as any).ejsc = {};
   }
 
-  const ejsc = window.ejsc;
+  const ejsc = (window as any).ejsc;
 
   // Cơ chế nhận phản hồi từ Flutter Native
-  ejsc._onNativeResponse = (id: number, res: any) => {
-    console.info(`[NativeBridge] Response for id: ${id}`, res);
-    const cb = flutterCallbacks.get(id);
+  ejsc._onNativeResponse = (id: number | string, res: any) => {
+    // Chuyển id sang số để khớp với flutterCallbacks (Map<number, ...>)
+    const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
+
+    console.info(`[NativeBridge] >>> Received response for id: ${numericId}`, res);
+
+    const cb = flutterCallbacks.get(numericId);
     if (cb) {
-      if (res?.error) {
-        cb.fail?.(res.error);
+      console.info(`[NativeBridge] Callback found for id: ${numericId}. Executing...`);
+      if (res?.success === false || res?.error) {
+        cb.fail?.(res.error || res.data);
       } else {
         let finalData = res.data;
         // Chuẩn hóa chooseImage: tempFilePaths -> filePaths, base64 -> data
@@ -133,8 +169,10 @@ if (typeof window !== 'undefined') {
         }
         cb.success?.(finalData);
       }
-      cb.complete?.();
-      flutterCallbacks.delete(id);
+      cb.complete?.(res?.data);
+      flutterCallbacks.delete(numericId);
+    } else {
+      console.warn(`[NativeBridge] !!! No callback found for id: ${numericId}. Current pending IDs:`, Array.from(flutterCallbacks.keys()));
     }
   };
 
@@ -142,13 +180,11 @@ if (typeof window !== 'undefined') {
    * Cơ chế nhận sự kiện chủ động từ Native
    */
   ejsc._onNativeEvent = (eventName: string, data: any) => {
-    // Relay lên dev-client.js (được CLI inject) để browser PC nhận được
-    const relayFn = window.__ejsc_relay;
-    if (typeof relayFn === 'function' && window.__EJSC_LOG_RELAY_ENABLED__ !== false) {
+    const relayFn = (window as any).__ejsc_relay;
+    if (typeof relayFn === 'function' && (window as any).__EJSC_LOG_RELAY_ENABLED__ !== false) {
       relayFn(eventName, data);
     }
 
-    // Xử lý riêng cho log để đẩy thẳng vào Web Console (nếu đang inspect WebView)
     if (eventName === 'native_log') {
       const { level, message, data: extraData } = data;
       const styles = {
@@ -166,10 +202,9 @@ if (typeof window !== 'undefined') {
         console.log(`%c${label} ${message}`, (styles as any)[level] || styles.info);
       }
     } else {
-      console.info(`[NativeEvent] ${eventName}`, data);
+      console.info(`[NativeEvent] ${eventName}`, JSON.stringify(data));
     }
 
-    // Phát sự kiện để UI có thể hiển thị nếu cần
     const event = new CustomEvent('ejsc:native-event', {
       detail: { eventName, data }
     });
@@ -180,12 +215,13 @@ if (typeof window !== 'undefined') {
   Object.assign(ejsc, {
     getSystemInfo: createBridgeMethod('getSystemInfo', (opts: any) =>
       opts.success?.({ model: 'Mock Device', system: 'Browser', version: '1.0.0' })),
+    getAppLanguage: createBridgeMethod('getAppLanguage', (opts: any) =>
+      opts.success?.({ language: 'vi' })),
     exitMiniApp: createBridgeMethod('exitMiniApp', (_opts: any) =>
       window.alert('[MockBridge] exitMiniApp called')),
     confirmBeforeExit: createBridgeMethod('confirmBeforeExit', (opts: any) =>
       opts.success?.({ confirm: window.confirm(opts.content ?? 'Thoát?') })),
 
-    // Settings / Permissions
     getSetting: createBridgeMethod('getSetting', (opts: any) =>
       opts.success?.({ authSetting: { 'scope.camera': true, 'scope.userLocation': true } })),
     authorize: createBridgeMethod('authorize', (opts: any) =>
@@ -197,11 +233,19 @@ if (typeof window !== 'undefined') {
     openNativeStore: createBridgeMethod('openNativeStore', (opts: any) =>
       opts.success?.({})),
 
-    // Location
     getLocation: createBridgeMethod('getLocation', (opts: any) =>
       opts.success?.({ latitude: 10.7626, longitude: 106.6602 })),
+    getUserLocation: createBridgeMethod('getUserLocation', (opts: any) =>
+      opts.success?.({
+        latitude: 10.7626,
+        longitude: 106.6602,
+        address: '123 Mock Street, HCM City',
+        city: 'Ho Chi Minh City',
+        country: 'Vietnam'
+      })),
+    openNativeMap: createBridgeMethod('openNativeMap', (opts: any) =>
+      opts.success?.({})),
 
-    // Media
     chooseImage: createBridgeMethod('chooseImage', (opts: any) => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -219,6 +263,8 @@ if (typeof window !== 'undefined') {
       };
       input.click();
     }),
+    captureImage: createBridgeMethod('captureImage', (opts: any) =>
+      opts.success?.({ path: 'https://picsum.photos/800/600' })),
     chooseMedia: createBridgeMethod('chooseMedia', (opts: any) =>
       opts.success?.({ tempFiles: [{ tempFilePath: 'https://picsum.photos/200' }] })),
     previewImage: createBridgeMethod('previewImage', (opts: any) =>
@@ -230,47 +276,44 @@ if (typeof window !== 'undefined') {
     getImageInfo: createBridgeMethod('getImageInfo', (opts: any) =>
       opts.success?.({ width: 100, height: 100, path: opts.src, orientation: 'up', type: 'png' })),
 
-    getAppLanguage: createBridgeMethod('getAppLanguage', (opts: any) =>
-      opts.success?.({ language: 'vi' })),
     getUserInfo: createBridgeMethod('getUserInfo', (opts: any) =>
       opts.success?.({
         isLoggedIn: true,
-        id: 'user_001',
-        fullName: 'Nguyễn Văn A',
-        email: 'vn@gmai.com',
-        avatarUrl: null,
-        phone: null
+        id: 'mock_user_001',
+        fullName: 'Nguyễn Văn A (Mock)',
+        email: 'mock@ejsc.vn',
+        avatarUrl: 'https://picsum.photos/200'
       })),
-    // Clipboard
+
     setClipboard: createBridgeMethod('setClipboard', (opts: any) => opts.success?.({})),
     getClipboard: createBridgeMethod('getClipboard', (opts: any) => opts.success?.({ text: 'Mocked clipboard text' })),
 
-    // Storage
     _store: {} as Record<string, any>,
-    setStorage: createBridgeMethod('setStorage', (opts: any) => {
-      if (!ejsc._store) ejsc._store = {};
-      ejsc._store[opts.key] = opts.data;
+    setStorage: createBridgeMethod('setStorage', function (this: any, opts: any) {
+      if (!this._store) this._store = {};
+      this._store[opts.key] = opts.data;
       opts.success?.({});
     }),
-    getStorage: createBridgeMethod('getStorage', (opts: any) => {
-      if (!ejsc._store) ejsc._store = {};
-      opts.success?.({ data: ejsc._store[opts.key] ?? null });
+    getStorage: createBridgeMethod('getStorage', function (this: any, opts: any) {
+      if (!this._store) this._store = {};
+      opts.success?.({ data: this._store[opts.key] ?? null });
     }),
-    removeStorage: createBridgeMethod('removeStorage', (opts: any) => {
-      if (!ejsc._store) ejsc._store = {};
-      delete ejsc._store[opts.key];
+    removeStorage: createBridgeMethod('removeStorage', function (this: any, opts: any) {
+      if (!this._store) this._store = {};
+      delete this._store[opts.key];
       opts.success?.({});
     }),
-    clearStorage: createBridgeMethod('clearStorage', (opts: any) => {
-      ejsc._store = {};
+    clearStorage: createBridgeMethod('clearStorage', function (this: any, opts: any) {
+      this._store = {};
       opts.success?.({});
     }),
-    getStorageInfo: createBridgeMethod('getStorageInfo', (opts: any) => {
-      if (!ejsc._store) ejsc._store = {};
-      opts.success?.({ keys: Object.keys(ejsc._store), currentSize: 0, limitSize: 10240 });
+    getStorageInfo: createBridgeMethod('getStorageInfo', function (this: any, opts: any) {
+      if (!this._store) this._store = {};
+      opts.success?.({ keys: Object.keys(this._store), currentSize: 0, limitSize: 10240 });
     }),
+    setSecureStorage: createBridgeMethod('setSecureStorage', (opts: any) => opts.success?.({})),
+    getSecureStorage: createBridgeMethod('getSecureStorage', (opts: any) => opts.success?.({ data: 'mock_secure_data' })),
 
-    // Network
     request: createBridgeMethod('request', (opts: any) => {
       fetch(opts.url, { method: opts.method ?? 'GET' })
         .then(r => r.json())
@@ -282,7 +325,6 @@ if (typeof window !== 'undefined') {
     uploadFile: createBridgeMethod('uploadFile', (opts: any) =>
       opts.success?.({ data: '{}', statusCode: 200 })),
 
-    // UI
     showToast: createBridgeMethod('showToast', (opts: any) => {
       console.info('[Toast]', opts.content);
       opts.success?.({});
@@ -312,11 +354,11 @@ if (typeof window !== 'undefined') {
     }),
     hideLoading: createBridgeMethod('hideLoading', (opts: any) => opts.success?.({})),
 
-    // Scan
     scan: createBridgeMethod('scan', (opts: any) =>
       opts.success?.('MOCK-QR-DATA')),
+    makePhoneCall: createBridgeMethod('makePhoneCall', (opts: any) => opts.success?.({})),
+    triggerHapticFeedback: createBridgeMethod('triggerHapticFeedback', (opts: any) => opts.success?.({})),
 
-    // Navigation
     setNavigationBar: createBridgeMethod('setNavigationBar', (opts: any) => {
       if (opts.title) document.title = opts.title;
       window.dispatchEvent(new CustomEvent('mock:setNavigationBar', { detail: opts }));
@@ -336,8 +378,11 @@ if (typeof window !== 'undefined') {
       }
       opts.success?.({});
     }),
+    openInAppBrowser: createBridgeMethod('openInAppBrowser', (opts: any) => {
+      window.open(opts.url, '_blank');
+      opts.success?.({});
+    }),
 
-    // Biometric
     bioMetrics: {
       isSupported: createBridgeMethod('bioMetrics', (opts: any) => opts.success?.({}), 'isSupported'),
       localAuth: createBridgeMethod('bioMetrics', (opts: any) => opts.success?.({}), 'localAuth'),
