@@ -19,7 +19,17 @@ const HomeScreen: React.FC = () => {
       hideAppBar
       contentClassName="p-0"
     >
-      <div className="relative bg-ejsc-bg-page min-h-screen">
+      <div className="relative bg-white min-h-screen flex flex-col">
+        {/* Landscape Banner Background (Immersive Style) - Mini App 02 */}
+        <div className="absolute top-0 left-0 right-0 h-[260px] z-0 overflow-hidden">
+          <img
+            src="https://images.unsplash.com/photo-1584622650111-993a426fbf0a?q=80&w=1064&auto=format&fit=crop"
+            className="w-full h-full object-cover"
+            alt="Header Background"
+          />
+          <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-black/5 to-white" />
+        </div>
+
         <HomeHeader onNavigate={navigate} />
         
         <HomeWelcome 
@@ -27,7 +37,7 @@ const HomeScreen: React.FC = () => {
         />
 
         {/* Main Curved Content Container */}
-        <div className="relative z-20 bg-gradient-to-b from-ejsc-bg-page via-white via-[10%] to-white px-4 pt-5 pb-8 flex flex-col gap-2.5 min-h-screen -mt-2 shadow-2xl rounded-t-(--ejsc-sys-radius)">
+        <div className="relative z-20 bg-gradient-to-b from-ejsc-bg-page via-white via-[10%] to-white px-4 pt-5 pb-8 flex flex-col gap-2.5 min-h-screen -mt-2 rounded-t-(--ejsc-sys-radius)">
           <HomeQuickStats />
           <HomeQuickAction />
           <HomeServiceGrid />
